@@ -11,7 +11,7 @@ app.use(express.json());
 
 // Health check
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", server: "juniper-railway-mcp-server", version: "1.0.0" });
+  res.json({ status: "ok", server: "juniper-railway-mcp-server", version: "1.0.1", tools: allTools.length });
 });
 
 // Auth middleware for MCP endpoint
