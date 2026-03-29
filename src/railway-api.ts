@@ -2,21 +2,47 @@ import { GraphQLClient } from "graphql-request";
 
 const RAILWAY_API_URL = "https://backboard.railway.com/graphql/v2";
 
-function getToken(): string {
-  const token = process.env.RAILWAY_TOKEN;
-  if (!token) {
-    throw new Error("RAILWAY_TOKEN environment variable is not set");
+// Railway supports two token types:
+// - Account/Workspace tokens: Authorization: Bearer <token>
+// - Project tokens: Project-Access-Token: <token>
+// We support both. Project tokens are scoped to a single project+environment.
+
+type TokenConfig = {
+  token: string;
+  type: "account" | "project";
+};
+
+function getTokenConfig(): TokenConfig {
+  // RAILWAY_ACCOUNT_TOKEN for account-level access
+  const accountToken = process.env.RAILWAY_ACCOUNT_TOKEN;
+  if (accountToken) {
+    return { token: accountToken, type: "account" };
   }
-  return token;
+
+  // RAILWAY_TOKEN as project token (default for Railway deployments)
+  const projectToken = process.env.RAILWAY_TOKEN;
+  if (projectToken) {
+    return { token: projectToken, type: "project" };
+  }
+
+  throw new Error(
+    "No Railway token found. Set RAILWAY_ACCOUNT_TOKEN (account-level) or RAILWAY_TOKEN (project-scoped)."
+  );
 }
 
 function getClient(): GraphQLClient {
-  return new GraphQLClient(RAILWAY_API_URL, {
-    headers: {
-      Authorization: `Bearer ${getToken()}`,
-      "x-source": "juniper-railway-mcp-server",
-    },
-  });
+  const config = getTokenConfig();
+  const headers: Record<string, string> = {
+    "x-source": "juniper-railway-mcp-server",
+  };
+
+  if (config.type === "account") {
+    headers["Authorization"] = `Bearer ${config.token}`;
+  } else {
+    headers["Project-Access-Token"] = config.token;
+  }
+
+  return new GraphQLClient(RAILWAY_API_URL, { headers });
 }
 
 function getPublicClient(): GraphQLClient {
@@ -25,6 +51,22 @@ function getPublicClient(): GraphQLClient {
       "x-source": "juniper-railway-mcp-server",
     },
   });
+}
+
+// Get project/environment IDs from the project token itself
+export async function getProjectTokenInfo(): Promise<{
+  projectId: string;
+  environmentId: string;
+} | null> {
+  const config = getTokenConfig();
+  if (config.type !== "project") return null;
+
+  const client = getClient();
+  const query = `query { projectToken { projectId environmentId } }`;
+  const data = await client.request<{
+    projectToken: { projectId: string; environmentId: string };
+  }>(query);
+  return data.projectToken;
 }
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -77,6 +119,17 @@ export type DeploymentLog = {
 // ── Queries ────────────────────────────────────────────────────────
 
 export async function listProjects(): Promise<Project[]> {
+  const config = getTokenConfig();
+
+  if (config.type === "project") {
+    // Project tokens can only access their own project
+    const tokenInfo = await getProjectTokenInfo();
+    if (!tokenInfo) throw new Error("Failed to get project token info");
+    const project = await getProject(tokenInfo.projectId);
+    return [project];
+  }
+
+  // Account token - can list all projects
   const client = getClient();
   const query = `
     query {
@@ -456,6 +509,129 @@ export async function getServiceDomains(
   return [...customDomains, ...serviceDomains];
 }
 
+// ── Service operations ─────────────────────────────────────────────
+
+export async function createService(
+  projectId: string,
+  name: string,
+  source?: { repo?: string; image?: string }
+): Promise<Service> {
+  const client = getClient();
+  const query = `
+    mutation($input: ServiceCreateInput!) {
+      serviceCreate(input: $input) {
+        id
+        name
+        createdAt
+        updatedAt
+      }
+    }
+  `;
+
+  const input: Record<string, unknown> = { projectId, name };
+  if (source) input.source = source;
+
+  const data = await client.request<{ serviceCreate: Service }>(query, { input });
+  return data.serviceCreate;
+}
+
+export async function connectServiceToRepo(
+  serviceId: string,
+  repo: string,
+  branch?: string
+): Promise<void> {
+  const client = getClient();
+  const query = `
+    mutation($id: String!, $input: ServiceConnectInput!) {
+      serviceConnect(id: $id, input: $input) {
+        id
+      }
+    }
+  `;
+
+  const input: Record<string, string> = { repo };
+  if (branch) input.branch = branch;
+
+  await client.request(query, { id: serviceId, input });
+}
+
+export async function updateServiceInstance(
+  serviceId: string,
+  environmentId: string,
+  config: {
+    startCommand?: string;
+    buildCommand?: string;
+    rootDirectory?: string;
+    healthcheckPath?: string;
+    numReplicas?: number;
+    sleepApplication?: boolean;
+    dockerfilePath?: string;
+    region?: string;
+  }
+): Promise<boolean> {
+  const client = getClient();
+  const query = `
+    mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
+      serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
+    }
+  `;
+
+  await client.request(query, { serviceId, environmentId, input: config });
+  return true;
+}
+
+export async function triggerDeploy(
+  serviceId: string,
+  environmentId: string
+): Promise<boolean> {
+  const client = getClient();
+  const query = `
+    mutation($serviceId: String!, $environmentId: String!) {
+      serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
+    }
+  `;
+
+  await client.request(query, { serviceId, environmentId });
+  return true;
+}
+
+export async function createCustomDomain(
+  projectId: string,
+  environmentId: string,
+  serviceId: string,
+  domain: string
+): Promise<{
+  id: string;
+  dnsRecords: Array<{ hostlabel: string; requiredValue: string }>;
+}> {
+  const client = getClient();
+  const query = `
+    mutation($input: CustomDomainCreateInput!) {
+      customDomainCreate(input: $input) {
+        id
+        status {
+          dnsRecords {
+            hostlabel
+            requiredValue
+          }
+        }
+      }
+    }
+  `;
+
+  const data = await client.request<{
+    customDomainCreate: {
+      id: string;
+      status: { dnsRecords: Array<{ hostlabel: string; requiredValue: string }> };
+    };
+  }>(query, { input: { projectId, environmentId, serviceId, domain } });
+
+  return {
+    id: data.customDomainCreate.id,
+    dnsRecords: data.customDomainCreate.status.dnsRecords,
+  };
+}
+
 // ── Template operations (public API) ───────────────────────────────
 
 export type Template = {
@@ -559,43 +735,42 @@ export async function deployTemplate(
 // ── Account Info ───────────────────────────────────────────────────
 
 export async function whoami(): Promise<{
-  id: string;
-  email: string;
+  tokenType: "account" | "project";
+  id?: string;
+  email?: string;
   name?: string;
-  teams: Array<{ id: string; name: string }>;
+  projectId?: string;
+  environmentId?: string;
+  projectName?: string;
 }> {
-  const client = getClient();
-  const query = `
-    query {
-      me {
-        id
-        email
-        name
-        teams {
-          edges {
-            node {
-              id
-              name
-            }
-          }
-        }
-      }
-    }
-  `;
+  const config = getTokenConfig();
 
-  const data = await client.request<{
-    me: {
-      id: string;
-      email: string;
-      name?: string;
-      teams: { edges: Array<{ node: { id: string; name: string } }> };
+  if (config.type === "project") {
+    const tokenInfo = await getProjectTokenInfo();
+    if (!tokenInfo) throw new Error("Failed to get project token info");
+
+    // Get project name
+    const project = await getProject(tokenInfo.projectId);
+
+    return {
+      tokenType: "project",
+      projectId: tokenInfo.projectId,
+      environmentId: tokenInfo.environmentId,
+      projectName: project.name,
     };
+  }
+
+  // Account token
+  const client = getClient();
+  const query = `query { me { id email name } }`;
+  const data = await client.request<{
+    me: { id: string; email: string; name?: string };
   }>(query);
 
   return {
+    tokenType: "account",
     id: data.me.id,
     email: data.me.email,
     name: data.me.name,
-    teams: data.me.teams.edges.map((e) => e.node),
   };
 }

@@ -15,13 +15,19 @@ export const checkStatusTool = {
   handler: async (): Promise<ToolResponse> => {
     try {
       const me = await api.whoami();
-      const teams = me.teams.map((t) => t.name).join(", ") || "none";
+      if (me.tokenType === "project") {
+        return text(
+          `Railway API Status: Connected (Project Token)\n\n` +
+            `Project: ${me.projectName} (${me.projectId})\n` +
+            `Environment: ${me.environmentId}\n` +
+            `Scope: Single project access`
+        );
+      }
       return text(
-        `Railway API Status: Connected\n\n` +
+        `Railway API Status: Connected (Account Token)\n\n` +
           `Account: ${me.email}\n` +
           `Name: ${me.name || "N/A"}\n` +
-          `User ID: ${me.id}\n` +
-          `Teams: ${teams}`
+          `User ID: ${me.id}`
       );
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -542,6 +548,190 @@ export const deployTemplateTool = {
   },
 };
 
+// ── create-service ─────────────────────────────────────────────────
+
+export const createServiceTool = {
+  name: "create-service",
+  title: "Create Railway Service",
+  description:
+    "Create a new service in a project. Optionally connect a GitHub repo or Docker image.",
+  inputSchema: {
+    projectId: z.string().describe("The Railway project ID"),
+    name: z.string().describe("Name for the new service"),
+    repo: z.string().optional().describe("GitHub repo to connect (e.g. 'owner/repo')"),
+    image: z.string().optional().describe("Docker image to deploy (e.g. 'redis:7-alpine')"),
+  },
+  handler: async ({
+    projectId,
+    name,
+    repo,
+    image,
+  }: {
+    projectId: string;
+    name: string;
+    repo?: string;
+    image?: string;
+  }): Promise<ToolResponse> => {
+    try {
+      const source = repo ? { repo } : image ? { image } : undefined;
+      const service = await api.createService(projectId, name, source);
+      return text(
+        `Service created:\n\n` +
+          `**${service.name}** (ID: ${service.id})\n` +
+          (repo ? `Connected to: ${repo}\n` : "") +
+          (image ? `Image: ${image}\n` : "")
+      );
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return text(`Failed to create service: ${msg}`);
+    }
+  },
+};
+
+// ── connect-service-repo ───────────────────────────────────────────
+
+export const connectServiceRepoTool = {
+  name: "connect-service-repo",
+  title: "Connect Service to GitHub Repo",
+  description: "Connect an existing service to a GitHub repository.",
+  inputSchema: {
+    serviceId: z.string().describe("The service ID"),
+    repo: z.string().describe("GitHub repo (e.g. 'owner/repo')"),
+    branch: z.string().optional().describe("Branch to deploy from (default: main)"),
+  },
+  handler: async ({
+    serviceId,
+    repo,
+    branch,
+  }: {
+    serviceId: string;
+    repo: string;
+    branch?: string;
+  }): Promise<ToolResponse> => {
+    try {
+      await api.connectServiceToRepo(serviceId, repo, branch);
+      return text(`Service connected to ${repo}${branch ? ` (branch: ${branch})` : ""}`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return text(`Failed to connect service: ${msg}`);
+    }
+  },
+};
+
+// ── update-service-config ──────────────────────────────────────────
+
+export const updateServiceConfigTool = {
+  name: "update-service-config",
+  title: "Update Service Configuration",
+  description:
+    "Update service instance settings: start command, build command, Dockerfile path, replicas, etc.",
+  inputSchema: {
+    serviceId: z.string().describe("The service ID"),
+    environmentId: z.string().describe("The environment ID"),
+    startCommand: z.string().optional().describe("Command to start the service"),
+    buildCommand: z.string().optional().describe("Command to build the service"),
+    rootDirectory: z.string().optional().describe("Root directory for the service"),
+    dockerfilePath: z.string().optional().describe("Path to Dockerfile"),
+    healthcheckPath: z.string().optional().describe("Healthcheck endpoint path"),
+    numReplicas: z.number().optional().describe("Number of replicas"),
+    sleepApplication: z.boolean().optional().describe("Whether to sleep when idle"),
+    region: z.string().optional().describe("Deployment region"),
+  },
+  handler: async (params: {
+    serviceId: string;
+    environmentId: string;
+    startCommand?: string;
+    buildCommand?: string;
+    rootDirectory?: string;
+    dockerfilePath?: string;
+    healthcheckPath?: string;
+    numReplicas?: number;
+    sleepApplication?: boolean;
+    region?: string;
+  }): Promise<ToolResponse> => {
+    try {
+      const { serviceId, environmentId, ...config } = params;
+      // Remove undefined values
+      const cleanConfig = Object.fromEntries(
+        Object.entries(config).filter(([, v]) => v !== undefined)
+      );
+      await api.updateServiceInstance(serviceId, environmentId, cleanConfig);
+      return text(`Service configuration updated:\n${JSON.stringify(cleanConfig, null, 2)}`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return text(`Failed to update service config: ${msg}`);
+    }
+  },
+};
+
+// ── trigger-deploy ─────────────────────────────────────────────────
+
+export const triggerDeployTool = {
+  name: "trigger-deploy",
+  title: "Trigger Deployment",
+  description: "Trigger a new deployment for a service in an environment.",
+  inputSchema: {
+    serviceId: z.string().describe("The service ID"),
+    environmentId: z.string().describe("The environment ID"),
+  },
+  handler: async ({
+    serviceId,
+    environmentId,
+  }: {
+    serviceId: string;
+    environmentId: string;
+  }): Promise<ToolResponse> => {
+    try {
+      await api.triggerDeploy(serviceId, environmentId);
+      return text("Deployment triggered successfully.");
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return text(`Failed to trigger deploy: ${msg}`);
+    }
+  },
+};
+
+// ── custom-domain-create ───────────────────────────────────────────
+
+export const customDomainCreateTool = {
+  name: "custom-domain-create",
+  title: "Add Custom Domain",
+  description:
+    "Add a custom domain to a service. Returns DNS records that need to be configured.",
+  inputSchema: {
+    projectId: z.string().describe("The Railway project ID"),
+    serviceId: z.string().describe("The service ID"),
+    environmentId: z.string().describe("The environment ID"),
+    domain: z.string().describe("The custom domain (e.g. 'api.juniperuniverse.com')"),
+  },
+  handler: async ({
+    projectId,
+    serviceId,
+    environmentId,
+    domain,
+  }: {
+    projectId: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+  }): Promise<ToolResponse> => {
+    try {
+      const result = await api.createCustomDomain(projectId, environmentId, serviceId, domain);
+      const records = result.dnsRecords
+        .map((r) => `  ${r.hostlabel} → ${r.requiredValue}`)
+        .join("\n");
+      return text(
+        `Custom domain added: ${domain}\n\n` +
+          `Domain ID: ${result.id}\n\n` +
+          `DNS Records to configure:\n${records}`
+      );
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return text(`Failed to add custom domain: ${msg}`);
+    }
+  },
+};
+
 // ── Export all tools ───────────────────────────────────────────────
 
 export const allTools = [
@@ -557,7 +747,12 @@ export const allTools = [
   setVariablesTool,
   createProjectTool,
   createEnvironmentTool,
+  createServiceTool,
+  connectServiceRepoTool,
+  updateServiceConfigTool,
+  triggerDeployTool,
   generateDomainTool,
+  customDomainCreateTool,
   searchTemplatesTool,
   deployTemplateTool,
 ];
