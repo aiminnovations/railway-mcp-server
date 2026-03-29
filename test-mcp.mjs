@@ -1,5 +1,5 @@
 // Full MCP test script
-const BASE = 'https://railway-mcp-server-production-fbda.up.railway.app/mcp';
+const BASE = 'https://railway-mcp-server-production-b5b5.up.railway.app/mcp';
 const API_KEY = '21c5c217-bf10-4539-8b4a-296aab7a2ca9';
 
 function parseSSE(text) {
