@@ -142,10 +142,6 @@ export async function listProjects(): Promise<Project[]> {
               description
               createdAt
               updatedAt
-              team {
-                id
-                name
-              }
               environments {
                 edges {
                   node {
@@ -177,7 +173,11 @@ export async function listProjects(): Promise<Project[]> {
 }
 
 export async function getProject(projectId: string): Promise<Project> {
+  const config = getTokenConfig();
   const client = getClient();
+
+  // Project tokens can't query 'team' field
+  const teamField = config.type === "account" ? "team { id name }" : "";
   const query = `
     query($projectId: String!) {
       project(id: $projectId) {
@@ -186,10 +186,7 @@ export async function getProject(projectId: string): Promise<Project> {
         description
         createdAt
         updatedAt
-        team {
-          id
-          name
-        }
+        ${teamField}
         environments {
           edges {
             node {
